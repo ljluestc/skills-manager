@@ -570,6 +570,8 @@
     "projectSkillsPath": "项目工作区 Skills 路径",
     "projectSkillsPathPlaceholder": ".my-agent/skills",
     "projectSkillsPathDesc": "可选。填写相对项目根目录的路径后，这个自定义 Agent 才会出现在项目工作区的目标 Agent 列表中。",
+    "recursiveScan": "扫描子目录",
+    "recursiveScanDesc": "在子目录中递归查找技能（查找 SKILL.md 文件）。",
     "projectSkillsPathValue": "项目路径：{{path}}",
     "projectSkillsPathDefault": "项目路径：{{path}}（默认）",
     "projectSkillsPathEmpty": "项目路径：未设置",

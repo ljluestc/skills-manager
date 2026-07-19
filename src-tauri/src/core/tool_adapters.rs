@@ -56,6 +56,10 @@ pub struct CustomToolDef {
     pub project_relative_skills_dir: Option<String>,
     #[serde(default)]
     pub category: ToolCategory,
+    /// When true, scan skills_dir recursively (looks for SKILL.md in subdirectories)
+    /// instead of treating only immediate children as skills.
+    #[serde(default)]
+    pub recursive_scan: bool,
 }
 
 impl ToolAdapter {
@@ -839,7 +843,7 @@ fn custom_tool_adapter(ct: CustomToolDef) -> ToolAdapter {
         override_skills_dir: Some(ct.skills_dir),
         category: ct.category,
         is_custom: true,
-        recursive_scan: false,
+        recursive_scan: ct.recursive_scan,
         project_relative_skills_dir: None,
     }
 }
@@ -973,6 +977,7 @@ mod tests {
                 skills_dir: tmp.path().join("legacy-skills").to_string_lossy().into_owned(),
                 project_relative_skills_dir: Some(".legacy/skills".to_string()),
                 category: ToolCategory::Lobster,
+                recursive_scan: false,
             },
             CustomToolDef {
                 key: "custom_agent".to_string(),
@@ -980,6 +985,7 @@ mod tests {
                 skills_dir: custom_skills.to_string_lossy().into_owned(),
                 project_relative_skills_dir: Some(custom_project_path.to_string()),
                 category: ToolCategory::Lobster,
+                recursive_scan: false,
             },
         ];
         store

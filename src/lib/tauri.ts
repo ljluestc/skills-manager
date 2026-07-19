@@ -221,12 +221,14 @@ export const addCustomTool = (
   displayName: string,
   skillsDir: string,
   projectRelativeSkillsDir?: string,
+  recursiveScan?: boolean,
 ) =>
   invoke<void>("add_custom_tool", {
     key,
     displayName,
     skillsDir,
     projectRelativeSkillsDir: projectRelativeSkillsDir ?? null,
+    recursiveScan: recursiveScan ?? null,
   });
 
 export const removeCustomTool = (key: string) =>

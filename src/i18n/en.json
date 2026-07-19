@@ -570,6 +570,8 @@
     "projectSkillsPath": "Project Workspace Skills Path",
     "projectSkillsPathPlaceholder": ".my-agent/skills",
     "projectSkillsPathDesc": "Optional. Set a path relative to the project root to make this custom agent available in project workspaces.",
+    "recursiveScan": "Scan subdirectories",
+    "recursiveScanDesc": "Find skills nested inside category subdirectories (looks for SKILL.md recursively).",
     "projectSkillsPathValue": "Project path: {{path}}",
     "projectSkillsPathDefault": "Project path: {{path}} (default)",
     "projectSkillsPathEmpty": "Project path: not set",

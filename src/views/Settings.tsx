@@ -209,6 +209,7 @@ export function Settings() {
   const [customName, setCustomName] = useState("");
   const [customPath, setCustomPath] = useState("");
   const [customProjectPath, setCustomProjectPath] = useState("");
+  const [customRecursiveScan, setCustomRecursiveScan] = useState(false);
   const [addingCustom, setAddingCustom] = useState(false);
   const [showMoreAgents, setShowMoreAgents] = useState(false);
 
@@ -302,13 +303,14 @@ export function Settings() {
     const trimKey = generateCustomAgentKey(trimName);
     setAddingCustom(true);
     try {
-      await api.addCustomTool(trimKey, trimName, trimPath, trimProjectPath || undefined);
+      await api.addCustomTool(trimKey, trimName, trimPath, trimProjectPath || undefined, customRecursiveScan || undefined);
       await refreshTools();
       toast.success(t("settings.customAgentAdded"));
       setShowAddCustom(false);
       setCustomName("");
       setCustomPath("");
       setCustomProjectPath("");
+      setCustomRecursiveScan(false);
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -1169,6 +1171,20 @@ export function Settings() {
                 <p className="mt-1 text-[12px] text-muted">
                   {t("settings.projectSkillsPathDesc")}
                 </p>
+              </div>
+              <div>
+                <label className="flex cursor-pointer items-start gap-2">
+                  <input
+                    type="checkbox"
+                    checked={customRecursiveScan}
+                    onChange={(e) => setCustomRecursiveScan(e.target.checked)}
+                    className="mt-0.5 h-3.5 w-3.5 accent-[var(--color-accent)]"
+                  />
+                  <span className="min-w-0">
+                    <span className="block text-[13px] text-secondary">{t("settings.recursiveScan")}</span>
+                    <span className="block text-[12px] text-muted">{t("settings.recursiveScanDesc")}</span>
+                  </span>
+                </label>
               </div>
               <div className="flex justify-end">
                 <button

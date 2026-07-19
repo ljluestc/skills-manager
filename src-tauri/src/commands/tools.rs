@@ -314,6 +314,7 @@ pub async fn add_custom_tool(
     display_name: String,
     skills_dir: String,
     project_relative_skills_dir: Option<String>,
+    recursive_scan: Option<bool>,
     store: State<'_, Arc<SkillStore>>,
 ) -> Result<(), AppError> {
     let store = store.inner().clone();
@@ -344,6 +345,7 @@ pub async fn add_custom_tool(
             skills_dir,
             project_relative_skills_dir,
             category: Default::default(),
+            recursive_scan: recursive_scan.unwrap_or(false),
         });
         set_custom_tools(&store, &customs)?;
         reconcile_tool_sync_after_path_change(&store, &key);
@@ -447,6 +449,7 @@ mod tests {
             skills_dir: target_base.to_string_lossy().to_string(),
             project_relative_skills_dir: None,
             category: Default::default(),
+            recursive_scan: false,
         }];
         store
             .set_setting(
