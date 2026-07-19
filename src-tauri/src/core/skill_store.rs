@@ -53,6 +53,22 @@ pub struct SkillTargetRecord {
     /// to skip redundant Copy-mode resyncs (issue #153). `None` for rows
     /// written before this column existed, or when the source had no hash.
     pub source_hash: Option<String>,
+    /// JSON-encoded `Vec<String>` of absolute file paths written as companion
+    /// files during this skill's last sync (e.g. slash-command `.md` files
+    /// placed in the agent's commands directory). `None` when no companions
+    /// were synced. Used by unsync to remove exactly those files.
+    pub companion_paths: Option<String>,
+}
+
+impl SkillTargetRecord {
+    /// Decode the stored JSON companion-path list. Returns an empty `Vec` when
+    /// the column is `NULL` or the JSON cannot be parsed.
+    pub fn companion_path_list(&self) -> Vec<String> {
+        self.companion_paths
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default()
+    }
 }
 
 /// One row of the pending-conflict projection (merge-engine design §4).
@@ -447,8 +463,8 @@ impl SkillStore {
     pub fn insert_target(&self, target: &SkillTargetRecord) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT OR REPLACE INTO skill_targets (id, skill_id, tool, target_path, mode, status, synced_at, last_error, source_hash)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT OR REPLACE INTO skill_targets (id, skill_id, tool, target_path, mode, status, synced_at, last_error, source_hash, companion_paths)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 target.id,
                 target.skill_id,
@@ -459,6 +475,7 @@ impl SkillStore {
                 target.synced_at,
                 target.last_error,
                 target.source_hash,
+                target.companion_paths,
             ],
         )?;
         Ok(())
@@ -467,7 +484,7 @@ impl SkillStore {
     pub fn get_targets_for_skill(&self, skill_id: &str) -> Result<Vec<SkillTargetRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, skill_id, tool, target_path, mode, status, synced_at, last_error, source_hash FROM skill_targets WHERE skill_id = ?1",
+            "SELECT id, skill_id, tool, target_path, mode, status, synced_at, last_error, source_hash, companion_paths FROM skill_targets WHERE skill_id = ?1",
         )?;
         let rows = stmt.query_map(params![skill_id], |row| {
             Ok(SkillTargetRecord {
@@ -480,6 +497,7 @@ impl SkillStore {
                 synced_at: row.get(6)?,
                 last_error: row.get(7)?,
                 source_hash: row.get(8)?,
+                companion_paths: row.get(9)?,
             })
         })?;
         Ok(rows.filter_map(|r| r.ok()).collect())
@@ -488,7 +506,7 @@ impl SkillStore {
     pub fn get_all_targets(&self) -> Result<Vec<SkillTargetRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, skill_id, tool, target_path, mode, status, synced_at, last_error, source_hash FROM skill_targets",
+            "SELECT id, skill_id, tool, target_path, mode, status, synced_at, last_error, source_hash, companion_paths FROM skill_targets",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(SkillTargetRecord {
@@ -501,6 +519,7 @@ impl SkillStore {
                 synced_at: row.get(6)?,
                 last_error: row.get(7)?,
                 source_hash: row.get(8)?,
+                companion_paths: row.get(9)?,
             })
         })?;
         Ok(rows.filter_map(|r| r.ok()).collect())

@@ -248,6 +248,117 @@ pub fn remove_target(target: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Sync companion files from a skill's `<subdir_name>/` subdirectory to
+/// a shared agent directory such as `~/.claude/commands/`.
+///
+/// Each regular file `<skill_source>/<subdir_name>/<file>` is written to
+/// `<target_dir>/<skill_name>-<file>`, prefixed with the skill name to
+/// avoid collisions between different skills that share the same target
+/// directory.
+///
+/// - In **Symlink** mode a per-file symlink is created (file symlink, not
+///   directory symlink). Falls back to a copy when file symlinks are
+///   unavailable (e.g. Windows without Developer Mode).
+/// - In **Copy** mode the file is copied directly.
+///
+/// Returns the absolute paths of all target files that were written.
+/// Returns `Ok(vec![])` when the source subdirectory does not exist,
+/// silently ignoring sub-directories and other non-regular entries.
+pub fn sync_companion_files(
+    skill_source: &Path,
+    subdir_name: &str,
+    skill_name: &str,
+    target_dir: &Path,
+    mode: SyncMode,
+) -> Result<Vec<std::path::PathBuf>> {
+    let source_subdir = skill_source.join(subdir_name);
+    if !source_subdir.is_dir() {
+        return Ok(vec![]);
+    }
+
+    // Mute the watcher echo for the whole companion target directory — we're
+    // about to write to it and don't want spurious UI refreshes (#248).
+    crate::core::file_watcher::mute_self_writes(target_dir);
+
+    std::fs::create_dir_all(target_dir)
+        .with_context(|| format!("Failed to create companion target dir {:?}", target_dir))?;
+
+    let mut written = Vec::new();
+
+    for entry in std::fs::read_dir(&source_subdir)
+        .with_context(|| format!("Failed to read companion subdir {:?}", source_subdir))?
+    {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if !file_type.is_file() {
+            if file_type.is_dir() {
+                log::debug!(
+                    "sync_companion_files: skipping nested directory {:?}",
+                    entry.path()
+                );
+            }
+            continue;
+        }
+
+        let filename = entry.file_name();
+        let filename_str = filename.to_string_lossy();
+        let target_filename = format!("{skill_name}-{filename_str}");
+        let target_path = target_dir.join(&target_filename);
+        let source_file = entry.path();
+
+        // Remove existing (handles both regular files and stale symlinks).
+        remove_target(&target_path).ok();
+
+        match mode {
+            SyncMode::Symlink => {
+                #[cfg(unix)]
+                {
+                    std::os::unix::fs::symlink(&source_file, &target_path).with_context(|| {
+                        format!(
+                            "Failed to create companion symlink {:?} -> {:?}",
+                            target_path, source_file
+                        )
+                    })?;
+                }
+                #[cfg(windows)]
+                {
+                    // File symlinks require SeCreateSymbolicLinkPrivilege or Developer
+                    // Mode. Fall back to a copy when unavailable.
+                    if std::os::windows::fs::symlink_file(&source_file, &target_path).is_err() {
+                        std::fs::copy(&source_file, &target_path).with_context(|| {
+                            format!(
+                                "Failed to copy companion file {:?} -> {:?}",
+                                source_file, target_path
+                            )
+                        })?;
+                    }
+                }
+                #[cfg(all(not(unix), not(windows)))]
+                {
+                    std::fs::copy(&source_file, &target_path).with_context(|| {
+                        format!(
+                            "Failed to copy companion file {:?} -> {:?}",
+                            source_file, target_path
+                        )
+                    })?;
+                }
+            }
+            SyncMode::Copy => {
+                std::fs::copy(&source_file, &target_path).with_context(|| {
+                    format!(
+                        "Failed to copy companion file {:?} -> {:?}",
+                        source_file, target_path
+                    )
+                })?;
+            }
+        }
+
+        written.push(target_path);
+    }
+
+    Ok(written)
+}
+
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
@@ -706,5 +817,96 @@ mod tests {
         ));
         // Both missing → must resync.
         assert!(!is_target_current(&src, &tgt, SyncMode::Copy, None, None));
+    }
+
+    // ── sync_companion_files ──
+
+    #[test]
+    fn companion_files_absent_subdir_returns_empty() {
+        let tmp = tempdir().unwrap();
+        let skill_src = tmp.path().join("my-skill");
+        fs::create_dir_all(&skill_src).unwrap();
+        fs::write(skill_src.join("SKILL.md"), "# hello").unwrap();
+        let target_dir = tmp.path().join("commands");
+
+        // No `commands/` subdir in the skill source — must return empty.
+        let result = sync_companion_files(&skill_src, "commands", "my-skill", &target_dir, SyncMode::Copy).unwrap();
+        assert!(result.is_empty());
+        // Target directory must not be created when there are no companions.
+        assert!(!target_dir.exists());
+    }
+
+    #[test]
+    fn companion_files_copy_mode_places_files_with_skill_prefix() {
+        let tmp = tempdir().unwrap();
+        let skill_src = tmp.path().join("my-skill");
+        let cmds_src = skill_src.join("commands");
+        fs::create_dir_all(&cmds_src).unwrap();
+        fs::write(cmds_src.join("debug.md"), "# debug command").unwrap();
+        fs::write(cmds_src.join("test.md"), "# test command").unwrap();
+        let target_dir = tmp.path().join("agent-commands");
+
+        let result = sync_companion_files(&skill_src, "commands", "my-skill", &target_dir, SyncMode::Copy).unwrap();
+
+        assert_eq!(result.len(), 2);
+        let written_names: std::collections::HashSet<String> = result
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(written_names.contains("my-skill-debug.md"), "expected my-skill-debug.md in {written_names:?}");
+        assert!(written_names.contains("my-skill-test.md"), "expected my-skill-test.md in {written_names:?}");
+        assert_eq!(fs::read_to_string(target_dir.join("my-skill-debug.md")).unwrap(), "# debug command");
+        assert_eq!(fs::read_to_string(target_dir.join("my-skill-test.md")).unwrap(), "# test command");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn companion_files_symlink_mode_creates_per_file_symlinks() {
+        let tmp = tempdir().unwrap();
+        let skill_src = tmp.path().join("my-skill");
+        let cmds_src = skill_src.join("commands");
+        fs::create_dir_all(&cmds_src).unwrap();
+        fs::write(cmds_src.join("run.md"), "# run command").unwrap();
+        let target_dir = tmp.path().join("agent-commands");
+
+        let result = sync_companion_files(&skill_src, "commands", "my-skill", &target_dir, SyncMode::Symlink).unwrap();
+
+        assert_eq!(result.len(), 1);
+        let link = target_dir.join("my-skill-run.md");
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink(), "expected a symlink at {link:?}");
+        assert_eq!(fs::read_to_string(&link).unwrap(), "# run command");
+    }
+
+    #[test]
+    fn companion_files_skips_nested_subdirectories() {
+        let tmp = tempdir().unwrap();
+        let skill_src = tmp.path().join("my-skill");
+        let cmds_src = skill_src.join("commands");
+        fs::create_dir_all(cmds_src.join("nested")).unwrap();
+        fs::write(cmds_src.join("nested").join("ignored.md"), "should be ignored").unwrap();
+        fs::write(cmds_src.join("kept.md"), "# kept").unwrap();
+        let target_dir = tmp.path().join("agent-commands");
+
+        let result = sync_companion_files(&skill_src, "commands", "my-skill", &target_dir, SyncMode::Copy).unwrap();
+
+        assert_eq!(result.len(), 1, "only top-level files should be synced");
+        assert!(target_dir.join("my-skill-kept.md").exists());
+        assert!(!target_dir.join("my-skill-nested").exists());
+    }
+
+    #[test]
+    fn companion_files_replaces_existing_stale_file() {
+        let tmp = tempdir().unwrap();
+        let skill_src = tmp.path().join("my-skill");
+        let cmds_src = skill_src.join("commands");
+        fs::create_dir_all(&cmds_src).unwrap();
+        fs::write(cmds_src.join("cmd.md"), "new content").unwrap();
+        let target_dir = tmp.path().join("agent-commands");
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::write(target_dir.join("my-skill-cmd.md"), "old content").unwrap();
+
+        sync_companion_files(&skill_src, "commands", "my-skill", &target_dir, SyncMode::Copy).unwrap();
+
+        assert_eq!(fs::read_to_string(target_dir.join("my-skill-cmd.md")).unwrap(), "new content");
     }
 }

@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use rusqlite::Connection;
 
 /// Current schema version. Bump this when adding a new migration.
-const LATEST_VERSION: u32 = 7;
+const LATEST_VERSION: u32 = 8;
 
 /// Run all pending migrations on the database.
 ///
@@ -54,6 +54,7 @@ fn migrate_step(conn: &Connection, from_version: u32) -> Result<()> {
         4 => migrate_v4_to_v5(conn),
         5 => migrate_v5_to_v6(conn),
         6 => migrate_v6_to_v7(conn),
+        7 => migrate_v7_to_v8(conn),
         _ => bail!("unknown migration version: {from_version}"),
     }
 }
@@ -276,6 +277,17 @@ fn migrate_v5_to_v6(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// v7 → v8: Add `companion_paths` to `skill_targets`. Stores a JSON array of
+/// absolute file paths that were written as companion files (e.g. slash commands
+/// placed in the agent's commands directory) alongside the main skill sync.
+/// Allows the unsync flow to clean them up precisely without guessing at patterns.
+///
+/// Existing rows get NULL, treated as "no companion files synced".
+fn migrate_v7_to_v8(conn: &Connection) -> Result<()> {
+    add_column_if_missing(conn, "skill_targets", "companion_paths", "TEXT")?;
+    Ok(())
+}
+
 /// v6 → v7: pending-conflict projection for the object merge engine
 /// (merge-engine design §4). A local UI cache only — the source of truth is
 /// the commit trailers plus `refs/skills-manager/conflict/*`, from which
@@ -362,6 +374,9 @@ mod tests {
         assert!(tables.contains(&"skill_tags".to_string()));
         assert!(tables.contains(&"scenario_skill_tools".to_string()));
         assert!(tables.contains(&"audit_log".to_string()));
+
+        // Verify v8 column exists.
+        assert!(has_column(&conn, "skill_targets", "companion_paths").unwrap());
     }
 
     #[test]

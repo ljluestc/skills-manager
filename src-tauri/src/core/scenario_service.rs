@@ -23,6 +23,11 @@ pub struct ScenarioSyncTarget {
     /// synced `SkillTargetRecord.source_hash` to skip redundant
     /// Copy-mode resyncs at startup (issue #153).
     pub source_hash: Option<String>,
+    /// Companion directory mappings for this skill/tool pair, resolved to
+    /// absolute paths. Each entry is `(source_subdir_name, absolute_target_dir)`.
+    /// When non-empty, `sync_desired_targets` also syncs files from each
+    /// named subdirectory of `source` into the corresponding agent directory.
+    pub companion_dirs: Vec<(String, PathBuf)>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -94,11 +99,60 @@ pub fn collect_scenario_sync_targets(
                 target,
                 mode,
                 source_hash: skill.content_hash.clone(),
+                companion_dirs: adapter.resolved_companion_dirs(),
             });
         }
     }
 
     Ok(targets)
+}
+
+/// Sync all companion files declared by a skill/adapter pair and return
+/// their absolute target paths. Errors per-companion are logged and skipped
+/// rather than aborting the whole sync, matching the resilience posture of
+/// the main skill sync.
+fn sync_companion_files(
+    source: &PathBuf,
+    skill_name: &str,
+    mode: sync_engine::SyncMode,
+    companion_dirs: &[(String, PathBuf)],
+) -> Vec<PathBuf> {
+    let mut all_paths = Vec::new();
+    for (subdir_name, target_dir) in companion_dirs {
+        match sync_engine::sync_companion_files(source, subdir_name, skill_name, target_dir, mode) {
+            Ok(paths) => all_paths.extend(paths),
+            Err(e) => log::warn!(
+                "Failed to sync companion subdir '{}' for skill '{}': {e}",
+                subdir_name, skill_name
+            ),
+        }
+    }
+    all_paths
+}
+
+/// Encode a list of companion file paths as a JSON string for storage in
+/// `skill_targets.companion_paths`. Returns `None` when the list is empty.
+fn encode_companion_paths(paths: &[PathBuf]) -> Option<String> {
+    if paths.is_empty() {
+        return None;
+    }
+    let strs: Vec<String> = paths.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+    serde_json::to_string(&strs).ok()
+}
+
+/// Remove each file path stored in the `companion_paths` JSON column of a
+/// `SkillTargetRecord`. Non-fatal: errors are logged and the loop continues.
+fn remove_companion_paths(companion_paths_json: &Option<String>) {
+    let paths: Vec<String> = companion_paths_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
+    for path_str in paths {
+        let path = PathBuf::from(&path_str);
+        if let Err(e) = sync_engine::remove_target(&path) {
+            log::warn!("Failed to remove companion file {}: {e}", path.display());
+        }
+    }
 }
 
 pub fn preview_scenario_sync(
@@ -165,6 +219,9 @@ pub fn sync_desired_targets(
         if let Some(existing) = existing_targets.get(&key) {
             let target_path = PathBuf::from(&existing.target_path);
             if target_path != desired.target {
+                // Skill's target path changed (e.g. user updated the path override).
+                // Remove old companion files before cleaning up the main target.
+                remove_companion_paths(&existing.companion_paths);
                 if let Err(e) = sync_engine::remove_target(&target_path) {
                     log::warn!(
                         "Failed to remove stale target {}: {e}",
@@ -209,8 +266,17 @@ pub fn sync_desired_targets(
             }
         }
 
+        // Before re-syncing, remove companion files from the previous sync so
+        // stale companions left from a prior version of the skill are cleaned up.
+        if let Some(existing) = existing_targets.get(&key) {
+            remove_companion_paths(&existing.companion_paths);
+        }
+
         match sync_engine::sync_skill(&desired.source, &desired.target, desired.mode) {
             Ok(actual_mode) => {
+                // Sync companion files (e.g. commands, rules) for this skill/tool pair.
+                let companion_paths =
+                    sync_companion_files(&desired.source, &desired.skill_name, actual_mode, &desired.companion_dirs);
                 let now = chrono::Utc::now().timestamp_millis();
                 let target_record = SkillTargetRecord {
                     id: uuid::Uuid::new_v4().to_string(),
@@ -225,6 +291,7 @@ pub fn sync_desired_targets(
                     // run of this loop can short-circuit when the central
                     // skill content has not changed (issue #153).
                     source_hash: desired.source_hash.clone(),
+                    companion_paths: encode_companion_paths(&companion_paths),
                 };
                 if let Err(e) = store.insert_target(&target_record) {
                     log::warn!(
@@ -293,6 +360,7 @@ pub fn unsync_obsolete_scenario_targets(
                 continue;
             }
 
+            remove_companion_paths(&target.companion_paths);
             if let Err(e) = sync_engine::remove_target(&path) {
                 log::warn!("Failed to remove sync target {}: {e}", path.display());
             }
@@ -316,6 +384,7 @@ pub fn unsync_scenario_skills(store: &SkillStore, scenario_id: &str) -> Result<(
     for skill_id in &skill_ids {
         let targets = store.get_targets_for_skill(skill_id).unwrap_or_default();
         for target in &targets {
+            remove_companion_paths(&target.companion_paths);
             let path = PathBuf::from(&target.target_path);
             if let Err(e) = sync_engine::remove_target(&path) {
                 log::warn!("Failed to remove sync target {}: {e}", path.display());
@@ -370,10 +439,14 @@ pub fn sync_skill_to_active_scenario(
                 if let Some(old) = old_targets.iter().find(|t| t.tool == adapter.key) {
                     let old_path = PathBuf::from(&old.target_path);
                     if old_path != adapter.skills_dir().join(&target_name) {
+                        remove_companion_paths(&old.companion_paths);
                         if let Err(e) = sync_engine::remove_target(&old_path) {
                             log::warn!("Failed to remove stale target {}: {e}", old_path.display());
                         }
                         let _ = store.delete_target(skill_id, &adapter.key);
+                    } else {
+                        // Same path — still clean up old companions before re-syncing.
+                        remove_companion_paths(&old.companion_paths);
                     }
                 }
 
@@ -381,6 +454,9 @@ pub fn sync_skill_to_active_scenario(
                 let mode = sync_engine::sync_mode_for_tool(&adapter.key, configured_mode.as_deref());
                 match sync_engine::sync_skill(&source, &target, mode) {
                     Ok(actual_mode) => {
+                        let companion_paths = sync_companion_files(
+                            &source, &skill.name, actual_mode, &adapter.resolved_companion_dirs()
+                        );
                         let now = chrono::Utc::now().timestamp_millis();
                         let target_record = super::skill_store::SkillTargetRecord {
                             id: uuid::Uuid::new_v4().to_string(),
@@ -392,6 +468,7 @@ pub fn sync_skill_to_active_scenario(
                             synced_at: Some(now),
                             last_error: None,
                             source_hash: skill.content_hash.clone(),
+                            companion_paths: encode_companion_paths(&companion_paths),
                         };
                         if let Err(e) = store.insert_target(&target_record) {
                             log::warn!("Failed to insert sync target for skill {skill_id}: {e}");
@@ -548,7 +625,17 @@ pub fn sync_single_skill_to_tool(
         .join(sync_engine::target_dir_name(&source, &skill.name));
     let configured_mode = store.get_setting("sync_mode").map_err(AppError::db)?;
     let mode = sync_engine::sync_mode_for_tool(tool, configured_mode.as_deref());
+
+    // Remove any companion files from a previous sync before re-deploying.
+    if let Ok(old_targets) = store.get_targets_for_skill(skill_id) {
+        if let Some(old) = old_targets.iter().find(|t| t.tool == tool) {
+            remove_companion_paths(&old.companion_paths);
+        }
+    }
+
     let actual_mode = sync_engine::sync_skill(&source, &target, mode).map_err(AppError::io)?;
+    let companion_paths =
+        sync_companion_files(&source, &skill.name, actual_mode, &adapter.resolved_companion_dirs());
 
     let now = chrono::Utc::now().timestamp_millis();
     let target_record = SkillTargetRecord {
@@ -561,6 +648,7 @@ pub fn sync_single_skill_to_tool(
         synced_at: Some(now),
         last_error: None,
         source_hash: skill.content_hash.clone(),
+        companion_paths: encode_companion_paths(&companion_paths),
     };
 
     store.insert_target(&target_record).map_err(AppError::db)?;
@@ -644,6 +732,9 @@ fn apply_add(
             let mode = sync_engine::sync_mode_for_tool(tool_key, configured_mode.as_deref());
             match sync_engine::sync_skill(&source, &target, mode) {
                 Ok(actual_mode) => {
+                    let companion_paths = sync_companion_files(
+                        &source, &skill.name, actual_mode, &adapter.resolved_companion_dirs()
+                    );
                     let now = chrono::Utc::now().timestamp_millis();
                     let target_record = SkillTargetRecord {
                         id: uuid::Uuid::new_v4().to_string(),
@@ -655,6 +746,7 @@ fn apply_add(
                         synced_at: Some(now),
                         last_error: None,
                         source_hash: skill.content_hash.clone(),
+                        companion_paths: encode_companion_paths(&companion_paths),
                     };
                     if let Err(e) = store.insert_target(&target_record) {
                         log::warn!(
@@ -692,7 +784,9 @@ fn apply_remove(
 ) -> Result<(), AppError> {
     let tool_set: HashSet<&String> = tool_keys.iter().collect();
 
-    let mut to_delete: Vec<(String, String, PathBuf)> = Vec::new();
+    // Collect targets to delete along with their companion paths (must be done
+    // before Phase 1 drops the DB rows, since companion_paths is stored there).
+    let mut to_delete: Vec<(String, String, PathBuf, Option<String>)> = Vec::new();
     for skill_id in skill_ids {
         let targets = store.get_targets_for_skill(skill_id).unwrap_or_default();
         for target in targets {
@@ -701,6 +795,7 @@ fn apply_remove(
                     skill_id.clone(),
                     target.tool.clone(),
                     PathBuf::from(&target.target_path),
+                    target.companion_paths.clone(),
                 ));
             }
         }
@@ -712,7 +807,12 @@ fn apply_remove(
 
     // Phase 1: drop the DB rows first so the post-delete recount below sees
     // the new ground truth when deciding which filesystem paths to keep.
-    for (skill_id, tool, _) in &to_delete {
+    // Companion files are removed separately (they are individual files, not
+    // shared directories, so the shared-path guard does not apply to them).
+    for (_, _, _, companion_paths_json) in &to_delete {
+        remove_companion_paths(companion_paths_json);
+    }
+    for (skill_id, tool, _, _) in &to_delete {
         if let Err(e) = store.delete_target(skill_id, tool) {
             log::warn!(
                 "apply_skills_to_tools(Remove): failed to delete target record for skill {skill_id} / {tool}: {e}"
@@ -723,7 +823,7 @@ fn apply_remove(
     // Phase 2: gather the paths the batch wanted to remove, then keep any path
     // a remaining (skill_id, tool) row still points at. This prevents wiping a
     // directory another adapter is sharing.
-    let candidate_paths: HashSet<PathBuf> = to_delete.iter().map(|(_, _, p)| p.clone()).collect();
+    let candidate_paths: HashSet<PathBuf> = to_delete.iter().map(|(_, _, p, _)| p.clone()).collect();
     let still_referenced: HashSet<PathBuf> = store
         .get_all_targets()
         .unwrap_or_default()
@@ -827,6 +927,7 @@ mod sync_desired_targets_tests {
                 synced_at: Some(1),
                 last_error: None,
                 source_hash: Some("h1".to_string()),
+                companion_paths: None,
             })
             .unwrap();
 
@@ -840,6 +941,7 @@ mod sync_desired_targets_tests {
             target: target.clone(),
             mode: sync_engine::SyncMode::Symlink,
             source_hash: Some("h1".to_string()),
+            companion_dirs: vec![],
         }];
 
         sync_desired_targets(&store, &desired).unwrap();
@@ -913,6 +1015,7 @@ mod sync_desired_targets_tests {
                 synced_at: Some(1),
                 last_error: None,
                 source_hash: Some("h1".to_string()),
+                companion_paths: None,
             })
             .unwrap();
 
@@ -924,6 +1027,7 @@ mod sync_desired_targets_tests {
             target: target.clone(),
             mode: sync_engine::SyncMode::Copy,
             source_hash: Some("h1".to_string()),
+            companion_dirs: vec![],
         }];
 
         sync_desired_targets(&store, &desired).unwrap();

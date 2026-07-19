@@ -14,6 +14,23 @@ pub enum ToolCategory {
     Lobster,
 }
 
+/// Declares that a skill's `<source_subdir>/` directory should be synced
+/// to the agent's `<target_dir>` when the skill is deployed.
+///
+/// Example: a Claude Code adapter entry with `source_subdir = "commands"`
+/// and `target_dir = ".claude/commands"` causes every file inside a skill's
+/// `commands/` subdirectory to be placed in `~/.claude/commands/` (named
+/// `<skill_name>-<filename>` to avoid collisions).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompanionDirEntry {
+    /// Name of the subdirectory inside the skill source that holds companion files
+    /// (e.g. `"commands"`, `"rules"`).
+    pub source_subdir: String,
+    /// Path relative to the user's home directory where companion files are placed
+    /// (e.g. `".claude/commands"`, `".cursor/rules"`).
+    pub target_dir: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ToolAdapter {
     pub key: String,
@@ -44,6 +61,12 @@ pub struct ToolAdapter {
     /// UI grouping. See [`ToolCategory`].
     #[serde(default)]
     pub category: ToolCategory,
+    /// Companion directory mappings. When a skill contains a subdirectory
+    /// named `source_subdir`, its files are also synced to the agent's
+    /// `target_dir` during deployment. Prefixed with the skill name to avoid
+    /// collisions between different skills sharing the same target directory.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub companion_dirs: Vec<CompanionDirEntry>,
 }
 
 /// Serializable custom tool definition stored in settings.
@@ -142,6 +165,23 @@ impl ToolAdapter {
     pub fn has_path_override(&self) -> bool {
         self.override_skills_dir.is_some()
     }
+
+    /// Resolve companion directory entries to `(source_subdir, absolute_target_dir)` pairs.
+    ///
+    /// The `target_dir` in each [`CompanionDirEntry`] is relative to the user's
+    /// home directory. This method expands it to an absolute path, preferring
+    /// an already-existing directory when multiple candidates apply (the same
+    /// logic as [`ToolAdapter::skills_dir`]).
+    pub fn resolved_companion_dirs(&self) -> Vec<(String, PathBuf)> {
+        self.companion_dirs
+            .iter()
+            .map(|entry| {
+                let candidates = Self::candidate_paths(&entry.target_dir);
+                let target = Self::select_existing_or_default(&candidates);
+                (entry.source_subdir.clone(), target)
+            })
+            .collect()
+    }
 }
 
 pub fn default_tool_adapters() -> Vec<ToolAdapter> {
@@ -157,6 +197,12 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            // Cursor reads project rules from `.cursor/rules/`. A skill's `rules/`
+            // subdirectory is synced there so Cursor picks it up automatically.
+            companion_dirs: vec![CompanionDirEntry {
+                source_subdir: "rules".into(),
+                target_dir: ".cursor/rules".into(),
+            }],
         },
         ToolAdapter {
             key: "claude_code".into(),
@@ -169,6 +215,12 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            // Claude Code reads slash commands from `~/.claude/commands/`. A skill's
+            // `commands/` subdirectory is synced there so Claude Code picks them up.
+            companion_dirs: vec![CompanionDirEntry {
+                source_subdir: "commands".into(),
+                target_dir: ".claude/commands".into(),
+            }],
         },
         ToolAdapter {
             // oh-my-pi (omp) reads native skills from asymmetric paths: the
@@ -186,6 +238,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: Some(".omp/skills".into()),
+            companion_dirs: vec![],
         },
         ToolAdapter {
             // Codex CLI reads user-level skills from `~/.codex/skills/` and
@@ -209,6 +262,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
         ToolAdapter {
             // Grok reads user-level skills from `~/.grok/skills/` and
@@ -224,6 +278,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
         ToolAdapter {
             key: "opencode".into(),
@@ -236,6 +291,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: Some(".opencode/skills".into()),
+            companion_dirs: vec![],
         },
         ToolAdapter {
             key: "antigravity".into(),
@@ -248,6 +304,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
         ToolAdapter {
             key: "amp".into(),
@@ -260,6 +317,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
         ToolAdapter {
             key: "kilo_code".into(),
@@ -272,6 +330,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
         ToolAdapter {
             key: "roo_code".into(),
@@ -284,6 +343,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
         ToolAdapter {
             key: "goose".into(),
@@ -296,6 +356,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
         ToolAdapter {
             key: "gemini_cli".into(),
@@ -308,6 +369,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
         ToolAdapter {
             key: "github_copilot".into(),
@@ -321,6 +383,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
         ToolAdapter {
             key: "openclaw".into(),
@@ -333,6 +396,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
         ToolAdapter {
             key: "droid".into(),
@@ -345,6 +409,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
         ToolAdapter {
             key: "windsurf".into(),
@@ -357,6 +422,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
         ToolAdapter {
             key: "trae".into(),
@@ -369,6 +435,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
         ToolAdapter {
             key: "cline".into(),
@@ -381,6 +448,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
         ToolAdapter {
             key: "deepagents".into(),
@@ -393,6 +461,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
         ToolAdapter {
             key: "firebender".into(),
@@ -405,6 +474,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
         ToolAdapter {
             key: "kimi".into(),
@@ -417,6 +487,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
         ToolAdapter {
             key: "replit".into(),
@@ -429,6 +500,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
         ToolAdapter {
             key: "warp".into(),
@@ -441,6 +513,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
         ToolAdapter {
             key: "augment".into(),
@@ -453,6 +526,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
         ToolAdapter {
             key: "bob".into(),
@@ -465,6 +539,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
         ToolAdapter {
             key: "codebuddy".into(),
@@ -477,6 +552,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
         ToolAdapter {
             key: "command_code".into(),
@@ -489,6 +565,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
         ToolAdapter {
             key: "continue".into(),
@@ -501,6 +578,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
         ToolAdapter {
             key: "cortex".into(),
@@ -513,6 +591,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
         ToolAdapter {
             key: "crush".into(),
@@ -525,6 +604,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
         ToolAdapter {
             key: "iflow".into(),
@@ -537,6 +617,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
         ToolAdapter {
             key: "junie".into(),
@@ -549,6 +630,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
         ToolAdapter {
             key: "kiro".into(),
@@ -561,6 +643,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
         ToolAdapter {
             key: "kode".into(),
@@ -573,6 +656,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
         ToolAdapter {
             key: "mcpjam".into(),
@@ -585,6 +669,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
         ToolAdapter {
             key: "mistral_vibe".into(),
@@ -597,6 +682,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
         ToolAdapter {
             key: "mux".into(),
@@ -609,6 +695,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
         ToolAdapter {
             key: "neovate".into(),
@@ -621,6 +708,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
         ToolAdapter {
             key: "openhands".into(),
@@ -633,6 +721,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
         ToolAdapter {
             key: "pi".into(),
@@ -645,6 +734,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
         ToolAdapter {
             key: "pochi".into(),
@@ -657,6 +747,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
         ToolAdapter {
             key: "qoder".into(),
@@ -669,6 +760,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
         ToolAdapter {
             key: "qwen_code".into(),
@@ -681,6 +773,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
         ToolAdapter {
             key: "trae_cn".into(),
@@ -693,6 +786,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
         ToolAdapter {
             key: "zencoder".into(),
@@ -705,6 +799,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
         ToolAdapter {
             key: "adal".into(),
@@ -717,6 +812,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
         ToolAdapter {
             key: "hermes".into(),
@@ -729,6 +825,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: true,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
         ToolAdapter {
             key: "qclaw".into(),
@@ -741,6 +838,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
         ToolAdapter {
             key: "easyclaw".into(),
@@ -753,6 +851,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
         ToolAdapter {
             key: "autoclaw".into(),
@@ -765,6 +864,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
         ToolAdapter {
             key: "workbuddy".into(),
@@ -777,6 +877,7 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             is_custom: false,
             recursive_scan: false,
             project_relative_skills_dir: None,
+            companion_dirs: vec![],
         },
     ]
 }
@@ -841,6 +942,7 @@ fn custom_tool_adapter(ct: CustomToolDef) -> ToolAdapter {
         is_custom: true,
         recursive_scan: false,
         project_relative_skills_dir: None,
+        companion_dirs: vec![],
     }
 }
 
